@@ -6,6 +6,10 @@
 
 ## Install :
 just clone repo and fill ".env" file and start project with "dev" command inside "package.json"
+
+# to do 
+- [ ] same download deduplication
+
 ## Licence :
 MIT License
 
