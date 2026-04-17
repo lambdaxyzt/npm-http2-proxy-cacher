@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    //    "dest": "dist",
+    //    "allowJs": true,]
+    "strict": true,
+    "moduleResolution": "bundler",
+    "types": ["vitest/globals"],
+    "target": "es2022",
+    "module": "ES2022",
+    "paths": {
+      "@src/*": ["./src/*"]
+    }
+  }
+}

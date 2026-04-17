@@ -1,0 +1,23 @@
+{
+  "name": "npm-http2-proxy-cacher",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon --watch src --ext ts,js,json --exec \"tsx --env-file=.env src/index.ts\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.24.0",
+  "dependencies": {
+    "@types/node": "^25.6.0",
+    "chance": "^1.1.13",
+    "tsx": "^4.21.0",
+    "vite-tsconfig-paths": "^6.1.1"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  }
+}
