@@ -1,23 +1,35 @@
 {
   "name": "npm-http2-proxy-cacher",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "A caching npm registry proxy that talks to the upstream over HTTP/2 (optionally through a SOCKS proxy) and rewrites tarball URLs to itself.",
   "type": "module",
+  "main": "src/index.ts",
   "scripts": {
-    "dev": "nodemon --watch src --ext ts,js,json --exec \"tsx --env-file=.env src/index.ts\""
+    "start": "tsx --env-file=.env src/index.ts",
+    "dev": "nodemon --watch src --ext ts,js,json --exec \"tsx --env-file=.env src/index.ts\"",
+    "copy-from-verdaccio": "tsx --env-file=.env src/copy-from-verdaccio.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "npm",
+    "registry",
+    "proxy",
+    "cache",
+    "http2",
+    "socks"
+  ],
+  "author": "Lambdaxyzt",
+  "license": "MIT",
   "packageManager": "pnpm@10.24.0",
   "dependencies": {
-    "@types/node": "^25.6.0",
-    "chance": "^1.1.13",
-    "tsx": "^4.21.0",
-    "vite-tsconfig-paths": "^6.1.1"
+    "socks": "^2.8.3"
   },
   "devDependencies": {
+    "@types/node": "^25.6.0",
+    "nodemon": "^3.1.9",
+    "tsx": "^4.21.0",
+    "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^4.1.4"
   }
 }

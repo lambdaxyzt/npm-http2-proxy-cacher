@@ -1,0 +1,17 @@
+services:
+  proxy:
+    build: .
+    ports:
+      - "${PORT:-4873}:4873"
+    env_file:
+      - .env
+    environment:
+      # Override so the app binds the port the container exposes.
+      PORT: 4873
+      STORAGE: /data
+    volumes:
+      - cache:/data
+    restart: unless-stopped
+
+volumes:
+  cache:
