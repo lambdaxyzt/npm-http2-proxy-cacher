@@ -1,5 +1,5 @@
 import http from "node:http";
-import { connectViaSocks } from "@src/lib/h2Connection";
+import { H2ConnectionManager } from "@src/lib/h2ConnectionManager";
 import {
   handleTarball,
   handlePackageJSON,
@@ -18,7 +18,9 @@ import {
   SOCKS_PROXY,
 } from "@src/config";
 
-const client = await connectViaSocks(TARGET, SOCKS_PROXY);
+const connection = new H2ConnectionManager(TARGET, SOCKS_PROXY);
+// Fail fast at startup if the upstream is unreachable.
+await connection.getSession();
 
 const server = http.createServer(async (req, res) => {
   console.log(`incoming request`, req.url);
@@ -28,8 +30,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const upstreamPath = BASE_PATH + req.url;
   const parsedRequest = parseRequest(req.url);
+  if (!parsedRequest.pkgName) {
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+
+  const upstreamPath = BASE_PATH + req.url;
   const packagePaths = getPackagePaths(parsedRequest);
 
   const headers: Record<string, string> = {
@@ -37,54 +45,64 @@ const server = http.createServer(async (req, res) => {
     ":path": upstreamPath,
   };
 
-  if (packagePaths.tarball) {
-    await handleTarball(client, headers, packagePaths, res);
-    return;
+  try {
+    // A live session, reconnecting transparently if the previous one was torn
+    // down by an idle upstream. Guards against ERR_HTTP2_INVALID_SESSION.
+    const client = await connection.getSession();
+
+    if (packagePaths.tarball) {
+      await handleTarball(client, headers, packagePaths, res);
+      return;
+    }
+
+    const hasCache =
+      (await isPathExist(packagePaths.packageJSON)) &&
+      (await isPathExist(packagePaths.packageMetaData));
+
+    // ETag the downstream client already holds, if any.
+    const clientETag =
+      typeof req.headers["if-none-match"] === "string"
+        ? req.headers["if-none-match"]
+        : undefined;
+
+    // ETag we cached from this upstream registry. May be missing on older
+    // metadata files that were written before ETags were persisted per registry.
+    const meta = hasCache
+      ? await readPackageMeta(packagePaths.packageMetaData)
+      : null;
+    const cachedEtag = getEtagForRegistry(meta, TARGET);
+
+    // Serve straight from cache without revalidating — but only when we actually
+    // have an ETag to hand out. If it's missing we fall through to re-fetch and
+    // populate it.
+    if (hasCache && SKIP_304_CHECK && cachedEtag) {
+      serveCachedPackageJSON(packagePaths, res, cachedEtag, clientETag);
+      return;
+    }
+
+    // Only revalidate with an ETag we actually hold; without one we want a full
+    // 200 so we can capture and persist the ETag.
+    if (cachedEtag) {
+      headers["If-None-Match"] = cachedEtag;
+    }
+
+    handlePackageJSON(
+      client,
+      headers,
+      packagePaths,
+      parsedRequest,
+      SERVER_URL,
+      PORT,
+      res,
+      cachedEtag,
+      clientETag,
+      TARGET,
+    );
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) res.writeHead(502);
+    if (!res.writableEnded) res.end();
   }
-
-  const hasCache =
-    (await isPathExist(packagePaths.packageJSON)) &&
-    (await isPathExist(packagePaths.packageMetaData));
-
-  // ETag the downstream client already holds, if any.
-  const clientETag =
-    typeof req.headers["if-none-match"] === "string"
-      ? req.headers["if-none-match"]
-      : undefined;
-
-  // ETag we cached from this upstream registry. May be missing on older
-  // metadata files that were written before ETags were persisted per registry.
-  const meta = hasCache
-    ? await readPackageMeta(packagePaths.packageMetaData)
-    : null;
-  const cachedEtag = getEtagForRegistry(meta, TARGET);
-
-  // Serve straight from cache without revalidating — but only when we actually
-  // have an ETag to hand out. If it's missing we fall through to re-fetch and
-  // populate it.
-  if (hasCache && SKIP_304_CHECK && cachedEtag) {
-    serveCachedPackageJSON(packagePaths, res, cachedEtag, clientETag);
-    return;
-  }
-
-  // Only revalidate with an ETag we actually hold; without one we want a full
-  // 200 so we can capture and persist the ETag.
-  if (cachedEtag) {
-    headers["If-None-Match"] = cachedEtag;
-  }
-
-  handlePackageJSON(
-    client,
-    headers,
-    packagePaths,
-    parsedRequest,
-    SERVER_URL,
-    PORT,
-    res,
-    cachedEtag,
-    clientETag,
-    TARGET,
-  );
 });
 
 server.listen(PORT, "0.0.0.0", () => {
@@ -94,7 +112,7 @@ server.listen(PORT, "0.0.0.0", () => {
 function shutdown(signal: string) {
   console.log(`received ${signal}, shutting down`);
   server.close(() => {
-    if (!client.destroyed) client.close();
+    connection.close();
     process.exit(0);
   });
 }
