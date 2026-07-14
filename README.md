@@ -10,8 +10,16 @@ disk, and rewrites tarball URLs to point back at itself.
   npm install would open.
 - **Tarball URL rewriting** — metadata is rewritten so tarballs are fetched (and
   cached) through this proxy.
+- **ETag revalidation, both ways** — the proxy revalidates cached metadata
+  upstream with `If-None-Match` and, downstream, honours the client's own
+  `If-None-Match`: a matching client ETag gets a `304 Not Modified`, otherwise a
+  `200` with an `ETag` header. ETags are stored **per upstream registry** in
+  `package.meta.json` (`{ "etags": { "<registry-url>": "<etag>" } }`). When the
+  upstream sends no ETag, one is derived from a content hash so revalidation
+  still works, and metadata missing an ETag is re-fetched to populate it.
 - **Optional revalidation skip** — with `SKIP_304_CHECK` enabled, cached
-  metadata is served without contacting the upstream, making installs very fast.
+  metadata is served without contacting the upstream (still honouring the
+  client's `If-None-Match`), making installs very fast.
 - **Optional SOCKS5 tunnel** — route the upstream connection through a proxy to
   get around restrictive firewalls.
 

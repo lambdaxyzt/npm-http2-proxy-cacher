@@ -1,9 +1,13 @@
 import http from "node:http";
-import fs from "node:fs";
 import { connectViaSocks } from "@src/lib/h2Connection";
-import { handleTarball, handlePackageJSON } from "@src/lib/proxyHandlers";
+import {
+  handleTarball,
+  handlePackageJSON,
+  serveCachedPackageJSON,
+} from "@src/lib/proxyHandlers";
 import { parseRequest } from "@src/lib/parseRequest";
 import { getPackagePaths } from "@src/lib/getPackagePaths";
+import { readPackageMeta, getEtagForRegistry } from "@src/lib/packageMeta";
 import { isPathExist } from "@src/util";
 import {
   TARGET,
@@ -42,23 +46,45 @@ const server = http.createServer(async (req, res) => {
     (await isPathExist(packagePaths.packageJSON)) &&
     (await isPathExist(packagePaths.packageMetaData));
 
-  if (hasCache && SKIP_304_CHECK) {
-    const stream = fs.createReadStream(packagePaths.packageJSON);
-    res.writeHead(200, { "content-type": "application/json" });
-    stream.pipe(res);
+  // ETag the downstream client already holds, if any.
+  const clientETag =
+    typeof req.headers["if-none-match"] === "string"
+      ? req.headers["if-none-match"]
+      : undefined;
+
+  // ETag we cached from this upstream registry. May be missing on older
+  // metadata files that were written before ETags were persisted per registry.
+  const meta = hasCache
+    ? await readPackageMeta(packagePaths.packageMetaData)
+    : null;
+  const cachedEtag = getEtagForRegistry(meta, TARGET);
+
+  // Serve straight from cache without revalidating — but only when we actually
+  // have an ETag to hand out. If it's missing we fall through to re-fetch and
+  // populate it.
+  if (hasCache && SKIP_304_CHECK && cachedEtag) {
+    serveCachedPackageJSON(packagePaths, res, cachedEtag, clientETag);
     return;
   }
 
-  if (hasCache) {
-    const data = JSON.parse(
-      await fs.promises.readFile(packagePaths.packageMetaData, "utf-8"),
-    );
-    if (data.etag) {
-      headers["If-None-Match"] = data.etag;
-    }
+  // Only revalidate with an ETag we actually hold; without one we want a full
+  // 200 so we can capture and persist the ETag.
+  if (cachedEtag) {
+    headers["If-None-Match"] = cachedEtag;
   }
 
-  handlePackageJSON(client, headers, packagePaths, parsedRequest, SERVER_URL, PORT, res);
+  handlePackageJSON(
+    client,
+    headers,
+    packagePaths,
+    parsedRequest,
+    SERVER_URL,
+    PORT,
+    res,
+    cachedEtag,
+    clientETag,
+    TARGET,
+  );
 });
 
 server.listen(PORT, "0.0.0.0", () => {
