@@ -6,8 +6,13 @@ import {
   serveCachedPackageJSON,
 } from "@src/lib/proxyHandlers";
 import { parseRequest } from "@src/lib/parseRequest";
-import { getPackagePaths } from "@src/lib/getPackagePaths";
-import { readPackageMeta, getEtagForRegistry } from "@src/lib/packageMeta";
+import { getPackagePaths, STORAGE } from "@src/lib/getPackagePaths";
+import { cleanupTempFiles } from "@src/lib/cleanupTempFiles";
+import {
+  readPackageMeta,
+  getEtagForRegistry,
+  getRewriteUrl,
+} from "@src/lib/packageMeta";
 import { isPathExist } from "@src/util";
 import {
   TARGET,
@@ -17,6 +22,12 @@ import {
   SKIP_304_CHECK,
   SOCKS_PROXY,
 } from "@src/config";
+
+// Reap partial cache writes orphaned by a previous hard crash before serving.
+const removedTempFiles = await cleanupTempFiles(STORAGE);
+if (removedTempFiles > 0) {
+  console.log(`removed ${removedTempFiles} orphaned .tmp file(s) from ${STORAGE}`);
+}
 
 const connection = new H2ConnectionManager(TARGET, SOCKS_PROXY);
 // Fail fast at startup if the upstream is unreachable.
@@ -71,12 +82,22 @@ const server = http.createServer(async (req, res) => {
       ? await readPackageMeta(packagePaths.packageMetaData)
       : null;
     const cachedEtag = getEtagForRegistry(meta, TARGET);
+    // Proxy URL the cached tarball links were rewritten to; if SERVER_URL has
+    // since changed, the stale host is fixed up when serving from cache.
+    const storedUrl = getRewriteUrl(meta);
 
     // Serve straight from cache without revalidating — but only when we actually
     // have an ETag to hand out. If it's missing we fall through to re-fetch and
     // populate it.
     if (hasCache && SKIP_304_CHECK && cachedEtag) {
-      serveCachedPackageJSON(packagePaths, res, cachedEtag, clientETag);
+      serveCachedPackageJSON(
+        packagePaths,
+        res,
+        cachedEtag,
+        clientETag,
+        storedUrl,
+        SERVER_URL,
+      );
       return;
     }
 
@@ -97,6 +118,7 @@ const server = http.createServer(async (req, res) => {
       cachedEtag,
       clientETag,
       TARGET,
+      storedUrl,
     );
   } catch (err) {
     console.error(err);

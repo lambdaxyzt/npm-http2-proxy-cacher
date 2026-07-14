@@ -3,10 +3,13 @@ import http2 from "node:http2";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { PassThrough, pipeline } from "node:stream";
-import { StreamingReplaceURLTransform } from "@src/lib/replaceDomainJSONFile/index";
+import {
+  StreamingReplaceURLTransform,
+  StreamingReplaceTransform,
+} from "@src/lib/replaceDomainJSONFile/index";
 import { ensureDirectory, isPathExist, randomID } from "@src/util";
 import { getPackagePaths } from "@src/lib/getPackagePaths";
-import { writePackageMeta } from "@src/lib/packageMeta";
+import { writePackageMeta, updatePackageMetaUrl } from "@src/lib/packageMeta";
 import { SingleFlight } from "@src/lib/singleFlight";
 import type { parseRequest } from "@src/lib/parseRequest";
 
@@ -42,6 +45,11 @@ function downloadTarball(
   return new Promise<void>((resolve, reject) => {
     const proxyReq = client.request(headers);
 
+    // Hoisted so the upstream `error` handler can tear down an in-progress
+    // write, even if the failure arrives after the temp file was opened.
+    let tempFile: string | undefined;
+    let fileStream: fs.WriteStream | undefined;
+
     proxyReq.on("response", async (h) => {
       const status = h[":status"] || 500;
       const responseHeaders = { ...h };
@@ -58,17 +66,18 @@ function downloadTarball(
       await ensureDirectory(packagePaths.dir);
       leaderRes.writeHead(status, responseHeaders);
 
-      const tempFile = `${packagePaths.tarball}.${randomID()}.tmp`;
-      const fileStream = fs.createWriteStream(tempFile);
+      tempFile = `${packagePaths.tarball}.${randomID()}.tmp`;
+      fileStream = fs.createWriteStream(tempFile);
+      const currentTempFile = tempFile;
       const tee = new PassThrough();
       proxyReq.pipe(tee);
       tee.pipe(fileStream);
       tee.pipe(leaderRes);
 
       fileStream.on("finish", () => {
-        fs.rename(tempFile, packagePaths.tarball!, (err) => {
+        fs.rename(currentTempFile, packagePaths.tarball!, (err) => {
           if (err) {
-            fs.unlink(tempFile, () => {});
+            fs.unlink(currentTempFile, () => {});
             reject(err);
           } else {
             resolve();
@@ -76,12 +85,16 @@ function downloadTarball(
         });
       });
       fileStream.on("error", (err) => {
-        fs.unlink(tempFile, () => {});
+        fs.unlink(currentTempFile, () => {});
         reject(err);
       });
     });
 
     proxyReq.on("error", (err) => {
+      // `.pipe()` does not forward source errors to the write stream, so on an
+      // upstream failure the temp file would otherwise be left orphaned on disk.
+      if (fileStream) fileStream.destroy();
+      if (tempFile) fs.unlink(tempFile, () => {});
       if (!leaderRes.headersSent) leaderRes.writeHead(502);
       leaderRes.end();
       reject(err);
@@ -154,12 +167,21 @@ export async function handleTarball(
  * client's copy is current and we reply `304 Not Modified`; otherwise we send
  * `200` with the cached body and an `ETag` header so the client can revalidate
  * next time.
+ *
+ * When `storedUrl` (the proxy URL the file's tarball links were rewritten to)
+ * differs from `currentUrl` (the proxy URL now in effect) — e.g. `SERVER_URL`
+ * changed since caching — the stale host is rewritten to the current one as the
+ * body streams out, so downstream tarball URLs always point at this proxy. The
+ * fixed content is also persisted back to the cache (and `meta.url` updated) so
+ * subsequent serves match and skip the rewrite.
  */
 export function serveCachedPackageJSON(
   packagePaths: ReturnType<typeof getPackagePaths>,
   res: http.ServerResponse,
   etag: string | undefined,
   clientETag: string | undefined,
+  storedUrl?: string,
+  currentUrl?: string,
 ) {
   if (etag && clientETag === etag) {
     res.writeHead(304, { etag });
@@ -173,11 +195,43 @@ export function serveCachedPackageJSON(
   if (etag) responseHeaders.etag = etag;
 
   const stream = fs.createReadStream(packagePaths.packageJSON);
-  res.writeHead(200, responseHeaders);
-  stream.pipe(res);
   stream.on("error", () => {
     if (!res.headersSent) res.writeHead(502);
     res.end();
+  });
+  res.writeHead(200, responseHeaders);
+
+  if (!(storedUrl && currentUrl && storedUrl !== currentUrl)) {
+    stream.pipe(res);
+    return;
+  }
+
+  // Rewrite the stale proxy host in tarball links to the current one, fanning
+  // the fixed bytes out to the client and, in parallel, back to disk.
+  const rewrite = new StreamingReplaceTransform(storedUrl, currentUrl);
+  const tee = new PassThrough();
+  pipeline(stream, rewrite, tee, (err) => {
+    if (err) console.error(err);
+  });
+  tee.pipe(res);
+
+  // Persist the fixed content atomically. Best-effort: failures here must not
+  // affect the response, which streams from the same `tee`.
+  const tempFile = `${packagePaths.packageJSON}.${randomID()}.tmp`;
+  const fileStream = fs.createWriteStream(tempFile);
+  tee.pipe(fileStream);
+  fileStream.on("finish", async () => {
+    try {
+      await fs.promises.rename(tempFile, packagePaths.packageJSON);
+      await updatePackageMetaUrl(packagePaths.packageMetaData, currentUrl);
+    } catch (err) {
+      console.error(err);
+      fs.unlink(tempFile, () => {});
+    }
+  });
+  fileStream.on("error", (err) => {
+    console.error(err);
+    fs.unlink(tempFile, () => {});
   });
 }
 
@@ -192,15 +246,28 @@ export function handlePackageJSON(
   cachedEtag: string | undefined,
   clientETag: string | undefined,
   registryUrl: string,
+  storedUrl: string | undefined,
 ) {
   const proxyReq = client.request(headers);
+
+  // Hoisted so the upstream `error` handler can clean up an in-progress write.
+  let tempFile: string | undefined;
+  let fileStream: fs.WriteStream | undefined;
 
   proxyReq.on("response", async (h) => {
     const status = h[":status"] || 500;
 
     if (status === 304) {
-      // Cache is still fresh upstream; serve it, honouring the client's ETag.
-      serveCachedPackageJSON(packagePaths, res, cachedEtag, clientETag);
+      // Cache is still fresh upstream; serve it, honouring the client's ETag
+      // and rewriting a stale proxy host if SERVER_URL changed since caching.
+      serveCachedPackageJSON(
+        packagePaths,
+        res,
+        cachedEtag,
+        clientETag,
+        storedUrl,
+        serverUrl,
+      );
       return;
     }
 
@@ -224,8 +291,9 @@ export function handlePackageJSON(
     // silently fails with ENOENT and the metadata is never cached.
     await ensureDirectory(packagePaths.dir);
 
-    const tempFile = `${packagePaths.packageJSON}.${randomID()}.tmp`;
-    const fileStream = fs.createWriteStream(tempFile);
+    tempFile = `${packagePaths.packageJSON}.${randomID()}.tmp`;
+    fileStream = fs.createWriteStream(tempFile);
+    const currentTempFile = tempFile;
     const transform = new StreamingReplaceURLTransform(
       parsedRequest.pkgName,
       serverUrl,
@@ -234,7 +302,13 @@ export function handlePackageJSON(
     const hasher = crypto.createHash("sha256");
     tee.on("data", (chunk) => hasher.update(chunk));
     pipeline(proxyReq, transform, tee, (err) => {
-      if (err) console.error(err);
+      if (err) {
+        console.error(err);
+        // The pipeline error does not reach `fileStream` through `.pipe()`, so
+        // tear it down explicitly to avoid leaving an orphaned temp file.
+        if (fileStream) fileStream.destroy();
+        fs.unlink(currentTempFile, () => {});
+      }
     });
     tee.pipe(fileStream);
     tee.pipe(res);
@@ -244,24 +318,30 @@ export function handlePackageJSON(
       // the metadata always carries one for future 304 revalidation.
       const etag = upstreamEtag ?? `"${hasher.digest("hex")}"`;
       try {
-        await fs.promises.rename(tempFile, packagePaths.packageJSON);
+        await fs.promises.rename(currentTempFile, packagePaths.packageJSON);
         await writePackageMeta(packagePaths.packageMetaData, {
-          url: `http://localhost:${port}`,
+          // Record the URL the tarball links were actually rewritten to, so a
+          // later SERVER_URL change can be detected and fixed up on serve.
+          url: serverUrl,
           registryUrl,
           etag,
         });
       } catch {
-        fs.unlink(tempFile, () => {});
+        fs.unlink(currentTempFile, () => {});
       }
     });
 
     fileStream.on("error", () => {
-      fs.unlink(tempFile, () => {});
+      fs.unlink(currentTempFile, () => {});
     });
   });
 
   proxyReq.on("error", (err) => {
     console.error(err);
+    // Clean up a partially written temp file if the failure lands after the
+    // response started streaming to disk.
+    if (fileStream) fileStream.destroy();
+    if (tempFile) fs.unlink(tempFile, () => {});
     if (!res.headersSent) {
       res.writeHead(502);
     }

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { hash } from "@src/util";
 
-const STORAGE = process.env.STORAGE || "./storage";
+export const STORAGE = process.env.STORAGE || "./storage";
 
 export function getPackagePaths({ pkgName, tarball }: { pkgName: string; tarball: string | null }) {
     let pkgDir: string;
