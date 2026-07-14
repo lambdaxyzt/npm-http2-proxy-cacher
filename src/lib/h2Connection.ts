@@ -3,6 +3,15 @@ import net from "node:net";
 import tls from "node:tls";
 import { SocksClient } from "socks";
 
+/**
+ * HTTP/2 flow-control window (per-stream and connection-level). The default is
+ * only 64 KiB, which caps throughput at window/RTT — brutal for multi-MB
+ * package metadata over a high-latency link (e.g. a SOCKS tunnel), where a
+ * single response can take tens of seconds. 16 MiB lets a whole metadata
+ * document stream in one flight.
+ */
+const H2_WINDOW_SIZE = 16 * 1024 * 1024;
+
 export interface SocksProxy {
   host: string;
   port: number;
@@ -61,6 +70,9 @@ export async function connectViaSocks(
 
       client = http2.connect(targetUrl, {
         createConnection: () => tlsSocket!,
+        // Advertise a large per-stream receive window so the upstream can send
+        // a full metadata document without stalling on WINDOW_UPDATE frames.
+        settings: { initialWindowSize: H2_WINDOW_SIZE },
       });
 
       client.on("error", (err) => {
@@ -69,6 +81,10 @@ export async function connectViaSocks(
       });
 
       client.on("close", () => cleanup());
+
+      // Raise the connection-level flow-control window too (setLocalWindowSize
+      // governs the whole session, not just individual streams).
+      client.setLocalWindowSize(H2_WINDOW_SIZE);
 
       console.log(`Successfully connected to ${targetUrl}`);
       resolve(client);
