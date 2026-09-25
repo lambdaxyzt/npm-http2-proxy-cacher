@@ -57,8 +57,9 @@ export async function connectViaSocks(
     });
 
     tlsSocket.on("error", (err) => {
+      const detail = describeTlsFailure(tlsSocket, err);
       cleanup();
-      reject(new Error(`TLS error: ${err.message}`));
+      reject(new Error(`TLS error: ${detail}`));
     });
 
     tlsSocket.on("secureConnect", () => {
@@ -90,4 +91,48 @@ export async function connectViaSocks(
       resolve(client);
     });
   });
+}
+
+/**
+ * Certificate failures ("certificate has expired", "self signed certificate in
+ * chain", ...) are useless without knowing *which* certificate was rejected:
+ * the real upstream, a TLS-intercepting middlebox, or a stale clock making a
+ * valid certificate look out of date. Node still exposes the peer chain on a
+ * failed handshake, so fold the identifying details into the error message.
+ */
+function describeTlsFailure(
+  tlsSocket: tls.TLSSocket | null,
+  err: NodeJS.ErrnoException,
+): string {
+  const parts = [err.message];
+  if (err.code) parts.push(`code=${err.code}`);
+
+  let peer: tls.PeerCertificate | undefined;
+  try {
+    peer = tlsSocket?.getPeerCertificate(true);
+  } catch {
+    // Socket already torn down; the message without chain details will do.
+  }
+
+  if (peer?.subject) {
+    parts.push(
+      `peer=${peer.subject.CN ?? "?"}`,
+      `issuer=${peer.issuer?.CN ?? "?"}`,
+      `valid=${peer.valid_from} .. ${peer.valid_to}`,
+    );
+  }
+
+  // The chain the server actually sent, so an expired intermediate or an
+  // unexpected interception root is visible at a glance.
+  const chain: string[] = [];
+  for (let cert = peer?.issuerCertificate; cert?.subject; ) {
+    chain.push(`${cert.issuer?.CN ?? "?"} -> ${cert.subject.CN ?? "?"} (${cert.valid_to})`);
+    // The root is self-issued and points at itself; stop before looping forever.
+    if (cert.issuerCertificate === cert || chain.length > 8) break;
+    cert = cert.issuerCertificate;
+  }
+  if (chain.length) parts.push(`chain=[${chain.join(", ")}]`);
+
+  parts.push(`clientTime=${new Date().toISOString()}`);
+  return parts.join(" ");
 }
