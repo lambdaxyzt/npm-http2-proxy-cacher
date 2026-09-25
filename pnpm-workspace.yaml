@@ -1,0 +1,5 @@
+# Allow these dependencies to run install scripts (pnpm 10 blocks them by
+# default). esbuild needs its postinstall to fetch/link its native binary,
+# which tsx and vitest depend on at runtime.
+onlyBuiltDependencies:
+  - esbuild

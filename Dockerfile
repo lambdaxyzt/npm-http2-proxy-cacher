@@ -7,8 +7,10 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Install dependencies first for better layer caching.
-COPY package.json pnpm-lock.yaml ./
+# Install dependencies first for better layer caching. pnpm-workspace.yaml
+# carries the onlyBuiltDependencies allowlist (e.g. esbuild) and must be
+# present before install so those build scripts are permitted to run.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 # Copy the rest of the source.
