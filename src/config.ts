@@ -26,6 +26,16 @@ export const SKIP_304_CHECK: boolean =
   process.env.SKIP_304_CHECK === "true" || process.env.SKIP_304_CHECK === "1";
 
 /**
+ * How often (ms) to PING the upstream HTTP/2 session. A session whose previous
+ * PING is still unanswered when the next is due is treated as dead and torn
+ * down, so a silently dropped connection is replaced instead of hanging
+ * requests. 0 disables the keepalive.
+ */
+export const PING_INTERVAL_MS: number = Number(
+  process.env.PING_INTERVAL_MS ?? 30_000,
+);
+
+/**
  * Optional SOCKS5 proxy for the upstream connection. When SOCKS_HOST is unset,
  * the proxy connects directly. Useful for tunnelling around restrictive firewalls.
  */

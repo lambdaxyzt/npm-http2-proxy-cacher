@@ -1,5 +1,4 @@
 import http from "node:http";
-import http2 from "node:http2";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { PassThrough, pipeline } from "node:stream";
@@ -9,9 +8,16 @@ import {
 } from "@src/lib/replaceDomainJSONFile/index";
 import { ensureDirectory, isPathExist, randomID } from "@src/util";
 import { getPackagePaths } from "@src/lib/getPackagePaths";
-import { writePackageMeta, updatePackageMetaUrl } from "@src/lib/packageMeta";
+import {
+  writePackageMeta,
+  updatePackageMetaUrl,
+  readPackageMeta,
+  getEtagForRegistry,
+  getRewriteUrl,
+} from "@src/lib/packageMeta";
 import { SingleFlight } from "@src/lib/singleFlight";
 import type { parseRequest } from "@src/lib/parseRequest";
+import type { H2ConnectionManager } from "@src/lib/h2ConnectionManager";
 
 /**
  * Coalesces concurrent downloads of the same tarball. Keyed by the tarball's
@@ -36,14 +42,15 @@ function serveTarballFromCache(tarballPath: string, res: http.ServerResponse) {
  * live. Resolves once a non-200 response is proxied or the cache file has been
  * written and atomically renamed into place; rejects on upstream/write errors.
  */
-function downloadTarball(
-  client: http2.ClientHttp2Session,
+async function downloadTarball(
+  upstream: H2ConnectionManager,
   headers: Record<string, string>,
   packagePaths: ReturnType<typeof getPackagePaths>,
   leaderRes: http.ServerResponse,
 ): Promise<void> {
+  const proxyReq = await upstream.request(headers);
+
   return new Promise<void>((resolve, reject) => {
-    const proxyReq = client.request(headers);
 
     // Hoisted so the upstream `error` handler can tear down an in-progress
     // write, even if the failure arrives after the temp file was opened.
@@ -105,7 +112,7 @@ function downloadTarball(
 }
 
 export async function handleTarball(
-  client: http2.ClientHttp2Session,
+  upstream: H2ConnectionManager,
   headers: Record<string, string>,
   packagePaths: ReturnType<typeof getPackagePaths>,
   res: http.ServerResponse,
@@ -133,7 +140,7 @@ export async function handleTarball(
   }
 
   const { promise, leader } = tarballDownloads.run(tarballPath, () =>
-    downloadTarball(client, headers, packagePaths, res),
+    downloadTarball(upstream, headers, packagePaths, res),
   );
 
   // A follower that raced past the peek() check above: don't tee to it here
@@ -235,8 +242,154 @@ export function serveCachedPackageJSON(
   });
 }
 
-export function handlePackageJSON(
-  client: http2.ClientHttp2Session,
+/**
+ * Outcome of one upstream metadata fetch, shared with every request that was
+ * coalesced onto it. `cached` means the cache file now holds current metadata
+ * (upstream answered 200 and we stored it, or 304 and ours was still fresh);
+ * otherwise `status` is the code to pass on (404 for an unknown package, ...).
+ */
+type PackageJSONOutcome = { cached: true } | { cached: false; status: number };
+
+/**
+ * Coalesces concurrent metadata fetches for the same package, keyed by its
+ * cache path, so a burst of installs resolving the same dependency makes one
+ * upstream request and one cache write instead of one per client.
+ */
+const packageJSONFetches = new SingleFlight<PackageJSONOutcome>();
+
+/**
+ * Fetches package metadata from upstream, streaming it live to `leaderRes`
+ * while rewriting tarball links and writing the cache. Resolves once the
+ * outcome is final: for a 200, only after the cache file and its metadata are
+ * on disk, so coalesced followers can serve from it. Rejects on upstream or
+ * write errors.
+ */
+async function fetchPackageJSON(
+  upstream: H2ConnectionManager,
+  headers: Record<string, string>,
+  packagePaths: ReturnType<typeof getPackagePaths>,
+  parsedRequest: ReturnType<typeof parseRequest>,
+  serverUrl: string,
+  leaderRes: http.ServerResponse,
+  cachedEtag: string | undefined,
+  clientETag: string | undefined,
+  registryUrl: string,
+  storedUrl: string | undefined,
+): Promise<PackageJSONOutcome> {
+  const proxyReq = await upstream.request(headers);
+
+  return new Promise<PackageJSONOutcome>((resolve, reject) => {
+    // Hoisted so the upstream `error` handler can clean up an in-progress write.
+    let tempFile: string | undefined;
+    let fileStream: fs.WriteStream | undefined;
+
+    proxyReq.on("response", async (h) => {
+      const status = h[":status"] || 500;
+
+      if (status === 304) {
+        // Cache is still fresh upstream; serve it, honouring the client's ETag
+        // and rewriting a stale proxy host if SERVER_URL changed since caching.
+        serveCachedPackageJSON(
+          packagePaths,
+          leaderRes,
+          cachedEtag,
+          clientETag,
+          storedUrl,
+          serverUrl,
+        );
+        resolve({ cached: true });
+        return;
+      }
+
+      if (status !== 200) {
+        const passStatus = status >= 500 ? 502 : status;
+        leaderRes.writeHead(passStatus);
+        leaderRes.end();
+        // Drain so the stream is released instead of sitting on flow control.
+        proxyReq.resume();
+        resolve({ cached: false, status: passStatus });
+        return;
+      }
+
+      const responseHeaders = { ...h };
+      delete responseHeaders[":status"];
+      delete responseHeaders["content-length"];
+      delete responseHeaders["Content-Length"];
+      // Prefer the upstream ETag; if upstream sent none we derive one from a
+      // hash of the stored content so downstream revalidation still works.
+      const upstreamEtag =
+        typeof responseHeaders.etag === "string" ? responseHeaders.etag : undefined;
+      leaderRes.writeHead(200, responseHeaders);
+
+      // Ensure the cache directory exists before writing, otherwise the write
+      // silently fails with ENOENT and the metadata is never cached.
+      await ensureDirectory(packagePaths.dir);
+
+      tempFile = `${packagePaths.packageJSON}.${randomID()}.tmp`;
+      fileStream = fs.createWriteStream(tempFile);
+      const currentTempFile = tempFile;
+      const transform = new StreamingReplaceURLTransform(
+        parsedRequest.pkgName,
+        serverUrl,
+      );
+      const tee = new PassThrough();
+      const hasher = crypto.createHash("sha256");
+      tee.on("data", (chunk) => hasher.update(chunk));
+      pipeline(proxyReq, transform, tee, (err) => {
+        if (err) {
+          // The pipeline error does not reach `fileStream` through `.pipe()`, so
+          // tear it down explicitly to avoid leaving an orphaned temp file.
+          if (fileStream) fileStream.destroy();
+          fs.unlink(currentTempFile, () => {});
+          if (!leaderRes.writableEnded) leaderRes.end();
+          reject(err);
+        }
+      });
+      tee.pipe(fileStream);
+      tee.pipe(leaderRes);
+
+      fileStream.on("finish", async () => {
+        // Fall back to a content hash when upstream doesn't supply an ETag, so
+        // the metadata always carries one for future 304 revalidation.
+        const etag = upstreamEtag ?? `"${hasher.digest("hex")}"`;
+        try {
+          await fs.promises.rename(currentTempFile, packagePaths.packageJSON);
+          await writePackageMeta(packagePaths.packageMetaData, {
+            // Record the URL the tarball links were actually rewritten to, so a
+            // later SERVER_URL change can be detected and fixed up on serve.
+            url: serverUrl,
+            registryUrl,
+            etag,
+          });
+          resolve({ cached: true });
+        } catch (err) {
+          fs.unlink(currentTempFile, () => {});
+          reject(err);
+        }
+      });
+
+      fileStream.on("error", (err) => {
+        fs.unlink(currentTempFile, () => {});
+        reject(err);
+      });
+    });
+
+    proxyReq.on("error", (err) => {
+      // Clean up a partially written temp file if the failure lands after the
+      // response started streaming to disk.
+      if (fileStream) fileStream.destroy();
+      if (tempFile) fs.unlink(tempFile, () => {});
+      if (!leaderRes.headersSent) leaderRes.writeHead(502);
+      leaderRes.end();
+      reject(err);
+    });
+
+    proxyReq.end();
+  });
+}
+
+export async function handlePackageJSON(
+  upstream: H2ConnectionManager,
   headers: Record<string, string>,
   packagePaths: ReturnType<typeof getPackagePaths>,
   parsedRequest: ReturnType<typeof parseRequest>,
@@ -248,105 +401,60 @@ export function handlePackageJSON(
   registryUrl: string,
   storedUrl: string | undefined,
 ) {
-  const proxyReq = client.request(headers);
-
-  // Hoisted so the upstream `error` handler can clean up an in-progress write.
-  let tempFile: string | undefined;
-  let fileStream: fs.WriteStream | undefined;
-
-  proxyReq.on("response", async (h) => {
-    const status = h[":status"] || 500;
-
-    if (status === 304) {
-      // Cache is still fresh upstream; serve it, honouring the client's ETag
-      // and rewriting a stale proxy host if SERVER_URL changed since caching.
-      serveCachedPackageJSON(
+  const { promise, leader } = packageJSONFetches.run(
+    packagePaths.packageJSON,
+    () =>
+      fetchPackageJSON(
+        upstream,
+        headers,
         packagePaths,
+        parsedRequest,
+        serverUrl,
         res,
         cachedEtag,
         clientETag,
+        registryUrl,
         storedUrl,
-        serverUrl,
-      );
-      return;
+      ),
+  );
+
+  if (leader) {
+    // The leader's response streams live from upstream; surface failures only.
+    try {
+      await promise;
+    } catch (err) {
+      console.error(err);
+      if (!res.headersSent) res.writeHead(502);
+      if (!res.writableEnded) res.end();
     }
+    return;
+  }
 
-    if (status !== 200) {
-      res.writeHead(status >= 500 ? 502 : status);
-      res.end();
-      return;
-    }
-
-    const responseHeaders = { ...h };
-    delete responseHeaders[":status"];
-    delete responseHeaders["content-length"];
-    delete responseHeaders["Content-Length"];
-    // Prefer the upstream ETag; if upstream sent none we derive one from a
-    // hash of the stored content so downstream revalidation still works.
-    const upstreamEtag =
-      typeof responseHeaders.etag === "string" ? responseHeaders.etag : undefined;
-    res.writeHead(200, responseHeaders);
-
-    // Ensure the cache directory exists before writing, otherwise the write
-    // silently fails with ENOENT and the metadata is never cached.
-    await ensureDirectory(packagePaths.dir);
-
-    tempFile = `${packagePaths.packageJSON}.${randomID()}.tmp`;
-    fileStream = fs.createWriteStream(tempFile);
-    const currentTempFile = tempFile;
-    const transform = new StreamingReplaceURLTransform(
-      parsedRequest.pkgName,
-      serverUrl,
-    );
-    const tee = new PassThrough();
-    const hasher = crypto.createHash("sha256");
-    tee.on("data", (chunk) => hasher.update(chunk));
-    pipeline(proxyReq, transform, tee, (err) => {
-      if (err) {
-        console.error(err);
-        // The pipeline error does not reach `fileStream` through `.pipe()`, so
-        // tear it down explicitly to avoid leaving an orphaned temp file.
-        if (fileStream) fileStream.destroy();
-        fs.unlink(currentTempFile, () => {});
-      }
-    });
-    tee.pipe(fileStream);
-    tee.pipe(res);
-
-    fileStream.on("finish", async () => {
-      // Fall back to a content hash when upstream doesn't supply an ETag, so
-      // the metadata always carries one for future 304 revalidation.
-      const etag = upstreamEtag ?? `"${hasher.digest("hex")}"`;
-      try {
-        await fs.promises.rename(currentTempFile, packagePaths.packageJSON);
-        await writePackageMeta(packagePaths.packageMetaData, {
-          // Record the URL the tarball links were actually rewritten to, so a
-          // later SERVER_URL change can be detected and fixed up on serve.
-          url: serverUrl,
-          registryUrl,
-          etag,
-        });
-      } catch {
-        fs.unlink(currentTempFile, () => {});
-      }
-    });
-
-    fileStream.on("error", () => {
-      fs.unlink(currentTempFile, () => {});
-    });
-  });
-
-  proxyReq.on("error", (err) => {
-    console.error(err);
-    // Clean up a partially written temp file if the failure lands after the
-    // response started streaming to disk.
-    if (fileStream) fileStream.destroy();
-    if (tempFile) fs.unlink(tempFile, () => {});
-    if (!res.headersSent) {
-      res.writeHead(502);
-    }
+  // Follower: wait for the leader's fetch, then answer from what it produced.
+  let outcome: PackageJSONOutcome;
+  try {
+    outcome = await promise;
+  } catch {
+    res.writeHead(502);
     res.end();
-  });
+    return;
+  }
 
-  proxyReq.end();
+  if (!outcome.cached) {
+    res.writeHead(outcome.status);
+    res.end();
+    return;
+  }
+
+  // Re-read the metadata the leader just wrote: the ETag and rewrite URL may
+  // differ from what this request saw before it was coalesced.
+  const meta = await readPackageMeta(packagePaths.packageMetaData);
+  serveCachedPackageJSON(
+    packagePaths,
+    res,
+    getEtagForRegistry(meta, registryUrl),
+    clientETag,
+    getRewriteUrl(meta),
+    serverUrl,
+  );
 }

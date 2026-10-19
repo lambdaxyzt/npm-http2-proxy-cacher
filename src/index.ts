@@ -21,6 +21,7 @@ import {
   BASE_PATH,
   SKIP_304_CHECK,
   SOCKS_PROXY,
+  PING_INTERVAL_MS,
 } from "@src/config";
 
 // Reap partial cache writes orphaned by a previous hard crash before serving.
@@ -29,7 +30,9 @@ if (removedTempFiles > 0) {
   console.log(`removed ${removedTempFiles} orphaned .tmp file(s) from ${STORAGE}`);
 }
 
-const connection = new H2ConnectionManager(TARGET, SOCKS_PROXY);
+const connection = new H2ConnectionManager(TARGET, SOCKS_PROXY, {
+  pingIntervalMs: PING_INTERVAL_MS,
+});
 // Fail fast at startup if the upstream is unreachable.
 await connection.getSession();
 
@@ -57,12 +60,8 @@ const server = http.createServer(async (req, res) => {
   };
 
   try {
-    // A live session, reconnecting transparently if the previous one was torn
-    // down by an idle upstream. Guards against ERR_HTTP2_INVALID_SESSION.
-    const client = await connection.getSession();
-
     if (packagePaths.tarball) {
-      await handleTarball(client, headers, packagePaths, res);
+      await handleTarball(connection, headers, packagePaths, res);
       return;
     }
 
@@ -107,8 +106,10 @@ const server = http.createServer(async (req, res) => {
       headers["If-None-Match"] = cachedEtag;
     }
 
-    handlePackageJSON(
-      client,
+    // Handlers resolve the upstream session only when they actually issue a
+    // request, so a session torn down while we awaited above is never used.
+    await handlePackageJSON(
+      connection,
       headers,
       packagePaths,
       parsedRequest,

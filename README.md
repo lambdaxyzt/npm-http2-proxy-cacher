@@ -35,6 +35,7 @@ Copy `.env.example` to `.env` and adjust:
 | `SKIP_304_CHECK` | no       | `true`/`1` to serve cached metadata without revalidating.          |
 | `SOCKS_HOST`     | no       | SOCKS5 proxy host. Unset = connect directly.                       |
 | `SOCKS_PORT`     | no       | SOCKS5 proxy port (default `1080`).                                |
+| `PING_INTERVAL_MS` | no     | Upstream HTTP/2 keepalive PING interval (default `30000`, `0` = off). |
 
 ## Run locally
 ```bash
