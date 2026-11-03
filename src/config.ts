@@ -56,10 +56,17 @@ export const PYPI_UPSTREAM: string = (
   process.env.PYPI_UPSTREAM || "https://pypi.org"
 ).replace(/\/+$/, "").replace(/\/simple$/, "");
 
-/** Host the PyPI index links package files to; those links are rewritten to this proxy. */
+/**
+ * Where the index's file links point; those links are rewritten to this proxy.
+ * Unset: pypi.org's file host, or PYPI_UPSTREAM + "/files", which is where
+ * another instance of this proxy serves them (path or domain mode).
+ */
 export const PYPI_FILES_UPSTREAM: string = (
-  process.env.PYPI_FILES_UPSTREAM || "https://files.pythonhosted.org"
-).replace(/\/$/, "");
+  process.env.PYPI_FILES_UPSTREAM ||
+  (new URL(PYPI_UPSTREAM).hostname === "pypi.org"
+    ? "https://files.pythonhosted.org"
+    : `${PYPI_UPSTREAM}/files`)
+).replace(/\/+$/, "");
 
 /** Normalizes a route prefix to "/x" form; "" mounts at the root. */
 function routePrefix(value: string | undefined, fallback: string): string {
