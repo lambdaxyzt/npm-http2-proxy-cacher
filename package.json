@@ -21,7 +21,6 @@
   ],
   "author": "Lambdaxyzt",
   "license": "MIT",
-  "packageManager": "pnpm@10.24.0",
   "dependencies": {
     "socks": "^2.8.3"
   },

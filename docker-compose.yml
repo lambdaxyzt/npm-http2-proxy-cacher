@@ -1,6 +1,15 @@
 services:
   proxy:
-    build: .
+    build:
+      context: .
+      args:
+        # Fetch pnpm and dependencies through the SOCKS proxy from .env, if set.
+        SOCKS_HOST: ${SOCKS_HOST:-}
+        SOCKS_PORT: ${SOCKS_PORT:-1080}
+      # Lets the build reach a proxy on the host (needed on Linux; Docker
+      # Desktop provides host.docker.internal already).
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
     ports:
       - "${PORT:-4873}:4873"
     env_file:
