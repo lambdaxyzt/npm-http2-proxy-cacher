@@ -40,11 +40,10 @@ Copy `.env.example` to `.env` and adjust:
 | `SOCKS_HOST`     | no       | SOCKS5 proxy host. Unset = connect directly.                       |
 | `SOCKS_PORT`     | no       | SOCKS5 proxy port (default `1080`).                                |
 | `PING_INTERVAL_MS` | no     | Upstream HTTP/2 keepalive PING interval (default `30000`, `0` = off). |
-| `PYPI_UPSTREAM`  | no       | PyPI index to cache from (default `https://pypi.org`).             |
-| `PYPI_FILES_UPSTREAM` | no  | Where the index's file links point (default `https://files.pythonhosted.org`). For a mirror, usually the same as `PYPI_UPSTREAM`. |
+| `PYPI_UPSTREAM`  | no       | PyPI to cache from (default `https://pypi.org`); `/simple` is added automatically. |
+| `PYPI_FILES_UPSTREAM` | no  | Where the index's file links point (default `https://files.pythonhosted.org`). For a Nexus-style mirror, the repository URL. |
 | `NPM_PATH`       | no       | Route prefix for npm (default `/npm`).                             |
-| `PYTHON_PATH`    | no       | Route prefix for pip/uv (default `/pip`).                          |
-| `PYTHON_FILE_PATH` | no     | Route prefix for package files (default `PYTHON_PATH` + `/files`). |
+| `PYTHON_PATH`    | no       | pip/uv index URL path (default `/pypi`).                    |
 
 
 ## Run locally
@@ -58,8 +57,8 @@ pnpm start             # one-off run
 Point your client at the proxy:
 ```bash
 npm install --registry http://localhost:4873/npm
-pip install requests --index-url http://localhost:4873/pip/simple
-uv pip install requests --index-url http://localhost:4873/pip/simple
+pip install requests --index-url http://localhost:4873/pypi
+uv pip install requests --index-url http://localhost:4873/pypi
 ```
 
 ## Run with Docker

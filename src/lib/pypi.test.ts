@@ -3,10 +3,17 @@ import { parsePypiRequest, rewritePypiLinks, PypiLinkRewriteTransform } from "@s
 
 describe("parsePypiRequest", () => {
   it("normalizes index names", () => {
-    const r = parsePypiRequest("/simple/Foo_Bar.baz")!;
+    const r = parsePypiRequest("/Foo_Bar.baz")!;
     expect(r.kind).toBe("index");
     expect(r.upstreamPath).toBe("/simple/foo-bar-baz/");
     expect(r.paths.packageJSON.endsWith(path.join("python", "simple", "foo-bar-baz", "index.html"))).toBe(true);
+  });
+
+  it("accepts index requests with or without /simple", () => {
+    expect(parsePypiRequest("/six/")!.upstreamPath).toBe("/simple/six/");
+    expect(parsePypiRequest("/simple/six/")!.upstreamPath).toBe("/simple/six/");
+    expect(parsePypiRequest("/simple/simple/")!.upstreamPath).toBe("/simple/simple/");
+    expect(parsePypiRequest("/simple/")).toBeNull();
   });
 
   it("maps files under the cache", () => {
@@ -20,8 +27,8 @@ describe("parsePypiRequest", () => {
     expect(parsePypiRequest("/files/../../etc/passwd")).toBeNull();
     expect(parsePypiRequest("/files/%2e%2e/%2e%2e/x")).toBeNull();
     expect(parsePypiRequest("/files/%E0%A4%A")).toBeNull();
-    expect(parsePypiRequest("/simple/")).toBeNull();
-    expect(parsePypiRequest("/react")).toBeNull();
+    expect(parsePypiRequest("/")).toBeNull();
+    expect(parsePypiRequest("/a/b/")).toBeNull();
   });
 });
 

@@ -48,10 +48,13 @@ export const SOCKS_PROXY: { host: string; port: number } | null =
       }
     : null;
 
-/** Upstream PyPI index (serves /simple/<name>/), e.g. https://pypi.org */
+/**
+ * Upstream PyPI, e.g. https://pypi.org. The proxy requests `/simple/<name>/`
+ * below it, so a trailing "/simple" here is dropped rather than doubled.
+ */
 export const PYPI_UPSTREAM: string = (
   process.env.PYPI_UPSTREAM || "https://pypi.org"
-).replace(/\/$/, "");
+).replace(/\/+$/, "").replace(/\/simple$/, "");
 
 /** Host the PyPI index links package files to; those links are rewritten to this proxy. */
 export const PYPI_FILES_UPSTREAM: string = (
@@ -67,11 +70,8 @@ function routePrefix(value: string | undefined, fallback: string): string {
 /** Route prefix npm clients use, e.g. --registry http://host:4873/npm */
 export const NPM_PATH: string = routePrefix(process.env.NPM_PATH, "/npm");
 
-/** Route prefix pip/uv use, e.g. --index-url http://host:4873/pip/simple */
-export const PYPI_PATH: string = routePrefix(process.env.PYTHON_PATH, "/pip");
+/** pip/uv index-url path, e.g. --index-url http://host:4873/pypi */
+export const PYPI_PATH: string = routePrefix(process.env.PYTHON_PATH, "/pypi");
 
-/** Route prefix the rewritten index links serve package files from. */
-export const PYPI_FILE_PATH: string = routePrefix(
-  process.env.PYTHON_FILE_PATH || undefined,
-  `${PYPI_PATH}/files`,
-);
+/** Route the rewritten index links serve package files (wheels, sdists) from. */
+export const PYPI_FILE_PATH = "/pypi/files";

@@ -9,22 +9,25 @@ const FILES_ROOT = path.resolve(ROOT, "files");
 
 type PypiRequest = {
   kind: "index" | "file";
-  /** Path below the upstream base, e.g. `/simple/requests/`. */
+  /** Path below PYPI_UPSTREAM, e.g. `/simple/requests/`. */
   upstreamPath: string;
   paths: ReturnType<typeof getPackagePaths>;
 };
 
 /**
- * Maps `/simple/<name>/` (the index pip/uv read) and `/files/<path>` (wheels
- * and sdists the rewritten index links to), with the PYTHON_PATH prefix already
- * stripped, to upstream paths and cache files. Returns null for anything else,
- * including paths escaping the cache.
+ * Maps `[/simple]/<name>/` (the index pip/uv read, PYTHON_PATH stripped) and
+ * `/files/<path>` (wheels and sdists the rewritten index links to) to upstream
+ * paths and cache files. Returns null for anything else, including paths
+ * escaping the cache.
  */
 export function parsePypiRequest(url: string): PypiRequest | null {
   const rawPath = url.split("?")[0];
 
-  const index = rawPath.match(/^\/simple\/([A-Za-z0-9._-]+)\/?$/);
-  if (index) {
+  // "/simple" is optional: pip may use PYTHON_PATH or PYTHON_PATH/simple as
+  // index-url, and a downstream proxy always asks for /simple/<name>/.
+  const index = rawPath.match(/^(?:\/simple)?\/([A-Za-z0-9._-]+)\/?$/);
+  // Bare "/simple/" is the full package listing, which isn't served.
+  if (index && !/^\/simple\/?$/.test(rawPath)) {
     // PEP 503 normalized name, so every spelling shares one cache entry.
     const name = index[1].toLowerCase().replace(/[-_.]+/g, "-");
     const dir = path.resolve(ROOT, "simple", name);

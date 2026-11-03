@@ -148,7 +148,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // Files first: PYTHON_FILE_PATH usually sits under PYTHON_PATH.
+    // Files first, in case PYTHON_PATH is set to cover /pypi/files.
     const fileUrl = stripPrefix(req.url, PYPI_FILE_PATH);
     const file = fileUrl === null ? null : parsePypiRequest(`/files${fileUrl}`);
     if (file?.kind === "file") {
