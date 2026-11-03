@@ -6,8 +6,9 @@ function required(name: string): string {
   return value;
 }
 
-/** Upstream registry, e.g. https://registry.npmjs.com */
-export const TARGET: string = required("UPSTREAM");
+/** Upstream npm registry, e.g. https://registry.npmjs.com (legacy name: UPSTREAM). */
+export const TARGET: string =
+  process.env.NPM_UPSTREAM || process.env.UPSTREAM || required("NPM_UPSTREAM");
 
 /** Port this proxy listens on. */
 export const PORT: number = Number(required("PORT"));
@@ -18,7 +19,7 @@ export const SERVER_URL: string = required("SERVER_URL");
 /** Directory where cached package metadata and tarballs are stored. */
 export const STORAGE: string = process.env.STORAGE || "./storage";
 
-/** Path prefix of the upstream registry (derived from UPSTREAM). */
+/** Path prefix of the upstream registry (derived from NPM_UPSTREAM). */
 export const BASE_PATH: string = new URL(TARGET).pathname;
 
 /** When true, serve cached metadata without revalidating against the upstream (304 check). */
@@ -46,3 +47,31 @@ export const SOCKS_PROXY: { host: string; port: number } | null =
         port: Number(process.env.SOCKS_PORT || 1080),
       }
     : null;
+
+/** Upstream PyPI index (serves /simple/<name>/), e.g. https://pypi.org */
+export const PYPI_UPSTREAM: string = (
+  process.env.PYPI_UPSTREAM || "https://pypi.org"
+).replace(/\/$/, "");
+
+/** Host the PyPI index links package files to; those links are rewritten to this proxy. */
+export const PYPI_FILES_UPSTREAM: string = (
+  process.env.PYPI_FILES_UPSTREAM || "https://files.pythonhosted.org"
+).replace(/\/$/, "");
+
+/** Normalizes a route prefix to "/x" form; "" mounts at the root. */
+function routePrefix(value: string | undefined, fallback: string): string {
+  const p = (value ?? fallback).replace(/\/+$/, "");
+  return p && !p.startsWith("/") ? `/${p}` : p;
+}
+
+/** Route prefix npm clients use, e.g. --registry http://host:4873/npm */
+export const NPM_PATH: string = routePrefix(process.env.NPM_PATH, "/npm");
+
+/** Route prefix pip/uv use, e.g. --index-url http://host:4873/pip/simple */
+export const PYPI_PATH: string = routePrefix(process.env.PYTHON_PATH, "/pip");
+
+/** Route prefix the rewritten index links serve package files from. */
+export const PYPI_FILE_PATH: string = routePrefix(
+  process.env.PYTHON_FILE_PATH || undefined,
+  `${PYPI_PATH}/files`,
+);

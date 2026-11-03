@@ -1,7 +1,7 @@
 {
-  "name": "npm-http2-proxy-cacher",
+  "name": "http2-proxy-cacher",
   "version": "1.0.0",
-  "description": "A caching npm registry proxy that talks to the upstream over HTTP/2 (optionally through a SOCKS proxy) and rewrites tarball URLs to itself.",
+  "description": "A caching npm and PyPI proxy that talks to the upstream over HTTP/2 (optionally through a SOCKS proxy) and rewrites download URLs to itself.",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
@@ -13,6 +13,8 @@
   },
   "keywords": [
     "npm",
+    "pypi",
+    "pip",
     "registry",
     "proxy",
     "cache",

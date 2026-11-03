@@ -1,8 +1,9 @@
-# npm-http2-proxy-cacher
+# HTTP2 Proxy Cacher
 
-A caching npm registry proxy. It talks to the upstream registry over **HTTP/2**
-(optionally through a **SOCKS5** proxy), caches package metadata and tarballs on
-disk, and rewrites tarball URLs to point back at itself.
+A caching proxy for **npm** and **Python (PyPI)** packages. It talks to the
+upstreams over **HTTP/2** (optionally through a **SOCKS5** proxy), caches
+package metadata and files on disk, and rewrites download URLs to point back at
+itself.
 
 ## Features
 - **HTTP/2 upstream** — multiplexes requests over a single connection, unlike
@@ -20,6 +21,9 @@ disk, and rewrites tarball URLs to point back at itself.
 - **Optional revalidation skip** — with `SKIP_304_CHECK` enabled, cached
   metadata is served without contacting the upstream (still honouring the
   client's `If-None-Match`), making installs very fast.
+- **PyPI support** — pip/uv index pages are cached and revalidated like npm
+  metadata; wheels and sdists are cached forever. Both absolute links (pypi.org)
+  and relative links (mirrors such as Nexus) are rewritten.
 - **Optional SOCKS5 tunnel** — route the upstream connection through a proxy to
   get around restrictive firewalls.
 
@@ -29,13 +33,19 @@ Copy `.env.example` to `.env` and adjust:
 | Variable         | Required | Description                                                        |
 |------------------|----------|--------------------------------------------------------------------|
 | `PORT`           | yes      | Port the proxy listens on.                                         |
-| `SERVER_URL`     | yes      | Public URL of the proxy; tarball links are rewritten to this.      |
-| `UPSTREAM`       | yes      | Upstream registry, e.g. `https://registry.npmjs.com`.              |
-| `STORAGE`        | no       | Cache directory (default `./storage`).                            |
+| `SERVER_URL`     | yes      | Public URL of the proxy; download links are rewritten to this.     |
+| `NPM_UPSTREAM`   | yes      | Upstream npm registry, e.g. `https://registry.npmjs.com` (old name `UPSTREAM` still works). |
+| `STORAGE`        | no       | Cache directory (default `./storage`), split into `npm/` and `python/`. |
 | `SKIP_304_CHECK` | no       | `true`/`1` to serve cached metadata without revalidating.          |
 | `SOCKS_HOST`     | no       | SOCKS5 proxy host. Unset = connect directly.                       |
 | `SOCKS_PORT`     | no       | SOCKS5 proxy port (default `1080`).                                |
 | `PING_INTERVAL_MS` | no     | Upstream HTTP/2 keepalive PING interval (default `30000`, `0` = off). |
+| `PYPI_UPSTREAM`  | no       | PyPI index to cache from (default `https://pypi.org`).             |
+| `PYPI_FILES_UPSTREAM` | no  | Where the index's file links point (default `https://files.pythonhosted.org`). For a mirror, usually the same as `PYPI_UPSTREAM`. |
+| `NPM_PATH`       | no       | Route prefix for npm (default `/npm`).                             |
+| `PYTHON_PATH`    | no       | Route prefix for pip/uv (default `/pip`).                          |
+| `PYTHON_FILE_PATH` | no     | Route prefix for package files (default `PYTHON_PATH` + `/files`). |
+
 
 ## Run locally
 ```bash
@@ -47,7 +57,9 @@ pnpm start             # one-off run
 
 Point your client at the proxy:
 ```bash
-npm install --registry http://localhost:4873
+npm install --registry http://localhost:4873/npm
+pip install requests --index-url http://localhost:4873/pip/simple
+uv pip install requests --index-url http://localhost:4873/pip/simple
 ```
 
 ## Run with Docker
@@ -57,8 +69,26 @@ docker compose up --build
 The compose file reads `.env`, exposes the port, and persists the cache in a
 named volume. Or build the image directly:
 ```bash
-docker build -t npm-http2-proxy-cacher .
-docker run --env-file .env -p 4873:4873 -v cache:/data npm-http2-proxy-cacher
+docker build -t http2-proxy-cacher .
+docker run --env-file .env -p 4873:4873 -v cache:/data http2-proxy-cacher
+```
+
+Build options (`--build-arg`):
+
+| Arg            | Default                 | Description                                                        |
+|----------------|-------------------------|--------------------------------------------------------------------|
+| `REGISTRY`     | `docker.arvancloud.ir`  | Docker registry mirror the `node` base image is pulled from.       |
+| `SOCKS_HOST`   | (empty)                 | SOCKS5 proxy for fetching pnpm and dependencies. `127.0.0.1` means the build host. |
+| `SOCKS_PORT`   | `1080`                  | SOCKS5 proxy port.                                                 |
+| `PNPM_VERSION` | `10.24.0`               | pnpm version installed with npm.                                   |
+
+Compose passes `SOCKS_HOST`/`SOCKS_PORT` from `.env` automatically. With
+`docker build`, pass them yourself; the proxy must accept connections from
+Docker (e.g. "allow LAN connections" in v2rayN):
+```bash
+docker build --add-host=host.docker.internal:host-gateway \
+  --build-arg SOCKS_HOST=127.0.0.1 --build-arg SOCKS_PORT=10808 \
+  -t http2-proxy-cacher .
 ```
 
 ## Tests

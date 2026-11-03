@@ -1,7 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { PassThrough, pipeline } from "node:stream";
+import { PassThrough, pipeline, type Transform } from "node:stream";
 import {
   StreamingReplaceURLTransform,
   StreamingReplaceTransform,
@@ -189,6 +189,7 @@ export function serveCachedPackageJSON(
   clientETag: string | undefined,
   storedUrl?: string,
   currentUrl?: string,
+  contentType = "application/json",
 ) {
   if (etag && clientETag === etag) {
     res.writeHead(304, { etag });
@@ -197,7 +198,7 @@ export function serveCachedPackageJSON(
   }
 
   const responseHeaders: Record<string, string> = {
-    "content-type": "application/json",
+    "content-type": contentType,
   };
   if (etag) responseHeaders.etag = etag;
 
@@ -275,6 +276,8 @@ async function fetchPackageJSON(
   clientETag: string | undefined,
   registryUrl: string,
   storedUrl: string | undefined,
+  makeTransform: () => Transform,
+  contentType: string | undefined,
 ): Promise<PackageJSONOutcome> {
   const proxyReq = await upstream.request(headers);
 
@@ -296,6 +299,7 @@ async function fetchPackageJSON(
           clientETag,
           storedUrl,
           serverUrl,
+          contentType,
         );
         resolve({ cached: true });
         return;
@@ -328,10 +332,7 @@ async function fetchPackageJSON(
       tempFile = `${packagePaths.packageJSON}.${randomID()}.tmp`;
       fileStream = fs.createWriteStream(tempFile);
       const currentTempFile = tempFile;
-      const transform = new StreamingReplaceURLTransform(
-        parsedRequest.pkgName,
-        serverUrl,
-      );
+      const transform = makeTransform();
       const tee = new PassThrough();
       const hasher = crypto.createHash("sha256");
       tee.on("data", (chunk) => hasher.update(chunk));
@@ -400,6 +401,10 @@ export async function handlePackageJSON(
   clientETag: string | undefined,
   registryUrl: string,
   storedUrl: string | undefined,
+  // Rewrites download links in the body; defaults to npm tarball links.
+  makeTransform: () => Transform = () =>
+    new StreamingReplaceURLTransform(parsedRequest.pkgName, serverUrl),
+  contentType?: string,
 ) {
   const { promise, leader } = packageJSONFetches.run(
     packagePaths.packageJSON,
@@ -415,6 +420,8 @@ export async function handlePackageJSON(
         clientETag,
         registryUrl,
         storedUrl,
+        makeTransform,
+        contentType,
       ),
   );
 
@@ -456,5 +463,6 @@ export async function handlePackageJSON(
     clientETag,
     getRewriteUrl(meta),
     serverUrl,
+    contentType,
   );
 }
