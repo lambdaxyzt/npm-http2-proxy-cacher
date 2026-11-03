@@ -59,7 +59,8 @@ export async function connectViaSocks(
     tlsSocket.on("error", (err) => {
       const detail = describeTlsFailure(tlsSocket, err);
       cleanup();
-      reject(new Error(`TLS error: ${detail}`));
+      const via = socksProxy ? ` via SOCKS ${socksProxy.host}:${socksProxy.port}` : "";
+      reject(new Error(`TLS error connecting to ${host}:${port}${via}: ${detail}`));
     });
 
     tlsSocket.on("secureConnect", () => {

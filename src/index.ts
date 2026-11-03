@@ -51,6 +51,11 @@ const pypiIndex = new H2ConnectionManager(PYPI_UPSTREAM, SOCKS_PROXY, {
 const pypiFiles = new H2ConnectionManager(PYPI_FILES_UPSTREAM, SOCKS_PROXY, {
   pingIntervalMs: PING_INTERVAL_MS,
 });
+// Warm up PyPI too, but don't fail startup: npm must keep working without it,
+// and a failed session is retried on the first Python request.
+for (const pypi of [pypiIndex, pypiFiles]) {
+  pypi.getSession().catch((err) => console.error(`PyPI upstream not reachable yet: ${err.message}`));
+}
 const PYPI_BASE_PATH = new URL(PYPI_UPSTREAM).pathname.replace(/\/$/, "");
 const PYPI_FILES_BASE_PATH = new URL(PYPI_FILES_UPSTREAM).pathname.replace(/\/$/, "");
 /** SERVER_URL with its hostname swapped for `host`, keeping scheme and port. */
