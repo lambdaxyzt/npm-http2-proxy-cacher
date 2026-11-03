@@ -2,6 +2,7 @@ import path from "node:path";
 import { Transform, type TransformCallback } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { STORAGE } from "@src/lib/getPackagePaths";
+import { hash } from "@src/util";
 import type { getPackagePaths } from "@src/lib/getPackagePaths";
 
 const ROOT = path.resolve(STORAGE, "python");
@@ -30,7 +31,8 @@ export function parsePypiRequest(url: string): PypiRequest | null {
   if (index && !/^\/simple\/?$/.test(rawPath)) {
     // PEP 503 normalized name, so every spelling shares one cache entry.
     const name = index[1].toLowerCase().replace(/[-_.]+/g, "-");
-    const dir = path.resolve(ROOT, "simple", name);
+    // Sharded by the last 2 hash chars, like the npm cache, to keep dirs small.
+    const dir = path.resolve(ROOT, "simple", hash(name).slice(-2), name);
     return {
       kind: "index",
       upstreamPath: `/simple/${name}/`,

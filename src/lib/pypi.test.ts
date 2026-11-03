@@ -1,12 +1,14 @@
 import path from "node:path";
 import { parsePypiRequest, rewritePypiLinks, PypiLinkRewriteTransform } from "@src/lib/pypi";
+import { hash } from "@src/util";
 
 describe("parsePypiRequest", () => {
   it("normalizes index names", () => {
     const r = parsePypiRequest("/Foo_Bar.baz")!;
     expect(r.kind).toBe("index");
     expect(r.upstreamPath).toBe("/simple/foo-bar-baz/");
-    expect(r.paths.packageJSON.endsWith(path.join("python", "simple", "foo-bar-baz", "index.html"))).toBe(true);
+    const shard = hash("foo-bar-baz").slice(-2);
+    expect(r.paths.packageJSON.endsWith(path.join("python", "simple", shard, "foo-bar-baz", "index.html"))).toBe(true);
   });
 
   it("accepts index requests with or without /simple", () => {

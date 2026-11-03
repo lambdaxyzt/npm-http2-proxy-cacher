@@ -29,6 +29,8 @@ import {
   NPM_PATH,
   PYPI_PATH,
   PYPI_FILE_PATH,
+  NPM_DOMAIN,
+  PYPI_DOMAIN,
 } from "@src/config";
 
 // Reap partial cache writes orphaned by a previous hard crash before serving.
@@ -51,12 +53,39 @@ const pypiFiles = new H2ConnectionManager(PYPI_FILES_UPSTREAM, SOCKS_PROXY, {
 });
 const PYPI_BASE_PATH = new URL(PYPI_UPSTREAM).pathname.replace(/\/$/, "");
 const PYPI_FILES_BASE_PATH = new URL(PYPI_FILES_UPSTREAM).pathname.replace(/\/$/, "");
-// Public URLs that rewritten download links point at.
-const NPM_PUBLIC_URL = SERVER_URL + NPM_PATH;
-const PYPI_FILES_PUBLIC_URL = SERVER_URL + PYPI_FILE_PATH;
+/** SERVER_URL with its hostname swapped for `host`, keeping scheme and port. */
+function domainUrl(host: string): string {
+  const url = new URL(SERVER_URL);
+  url.hostname = host;
+  return url.origin;
+}
 
-/** Returns `url` with `prefix` removed, or null when it isn't under it. */
-function stripPrefix(url: string, prefix: string): string | null {
+// Files live at /files on a dedicated Python domain, else at PYPI_FILE_PATH.
+const PYPI_DOMAIN_FILE_PATH = "/files";
+
+// Public URLs that rewritten download links point at.
+const NPM_PUBLIC_URL = NPM_DOMAIN ? domainUrl(NPM_DOMAIN) : SERVER_URL + NPM_PATH;
+const PYPI_FILES_PUBLIC_URL = PYPI_DOMAIN
+  ? domainUrl(PYPI_DOMAIN) + PYPI_DOMAIN_FILE_PATH
+  : SERVER_URL + PYPI_FILE_PATH;
+
+/**
+ * Route prefixes for this request's host: a registry with a domain is served
+ * only there, at the root; one without uses its path on any host. null = off.
+ */
+function routesFor(req: http.IncomingMessage) {
+  const host = (req.headers.host ?? "").replace(/:\d+$/, "").toLowerCase();
+  const onPypiDomain = host === PYPI_DOMAIN;
+  return {
+    npm: NPM_DOMAIN ? (host === NPM_DOMAIN ? "" : null) : NPM_PATH,
+    pypi: PYPI_DOMAIN ? (onPypiDomain ? "" : null) : PYPI_PATH,
+    pypiFiles: PYPI_DOMAIN ? (onPypiDomain ? PYPI_DOMAIN_FILE_PATH : null) : PYPI_FILE_PATH,
+  };
+}
+
+/** Returns `url` with `prefix` removed, or null when it isn't under it (or prefix is null). */
+function stripPrefix(url: string, prefix: string | null): string | null {
+  if (prefix === null) return null;
   if (!prefix) return url;
   return url.startsWith(`${prefix}/`) ? url.slice(prefix.length) : null;
 }
@@ -148,8 +177,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // Files first, in case PYTHON_PATH is set to cover /pypi/files.
-    const fileUrl = stripPrefix(req.url, PYPI_FILE_PATH);
+    const routes = routesFor(req);
+    // Files first, since the index route may cover the files path.
+    const fileUrl = stripPrefix(req.url, routes.pypiFiles);
     const file = fileUrl === null ? null : parsePypiRequest(`/files${fileUrl}`);
     if (file?.kind === "file") {
       const headers = {
@@ -159,7 +189,7 @@ const server = http.createServer(async (req, res) => {
       await handleTarball(pypiFiles, headers, file.paths, res);
       return;
     }
-    const pypiUrl = stripPrefix(req.url, PYPI_PATH);
+    const pypiUrl = stripPrefix(req.url, routes.pypi);
     const pypi = pypiUrl === null ? null : parsePypiRequest(pypiUrl);
     if (pypi?.kind === "index") {
       // Ask for HTML (PEP 503) so the cached format is fixed regardless of
@@ -187,7 +217,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const npmUrl = stripPrefix(req.url, NPM_PATH);
+    const npmUrl = stripPrefix(req.url, routes.npm);
     const parsedRequest = npmUrl === null ? null : parseRequest(npmUrl);
     if (!parsedRequest?.pkgName) {
       res.writeHead(404);

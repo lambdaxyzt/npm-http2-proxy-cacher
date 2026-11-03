@@ -44,6 +44,8 @@ Copy `.env.example` to `.env` and adjust:
 | `PYPI_FILES_UPSTREAM` | no  | Where the index's file links point (default `https://files.pythonhosted.org`). For a Nexus-style mirror, the repository URL. |
 | `NPM_PATH`       | no       | Route prefix for npm (default `/npm`).                             |
 | `PYTHON_PATH`    | no       | pip/uv index URL path (default `/pypi`).                    |
+| `NPM_DOMAIN`     | no       | Serve npm only on this host, at its root (`NPM_PATH` is then ignored). |
+| `PYTHON_DOMAIN`  | no       | Serve pip/uv only on this host, at its root, files at `/files` (`PYTHON_PATH` is then ignored). |
 
 
 ## Run locally
@@ -60,6 +62,11 @@ npm install --registry http://localhost:4873/npm
 pip install requests --index-url http://localhost:4873/pypi
 uv pip install requests --index-url http://localhost:4873/pypi
 ```
+
+With `NPM_DOMAIN=npm.example.com` and `PYTHON_DOMAIN=pypi.example.com`, use
+`--registry https://npm.example.com` and `--index-url https://pypi.example.com`
+instead. Routing uses the `Host` header, so a reverse proxy in front must pass
+it through (nginx: `proxy_set_header Host $host;`).
 
 ## Run with Docker
 ```bash

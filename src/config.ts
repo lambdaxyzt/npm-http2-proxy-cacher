@@ -75,3 +75,15 @@ export const PYPI_PATH: string = routePrefix(process.env.PYTHON_PATH, "/pypi");
 
 /** Route the rewritten index links serve package files (wheels, sdists) from. */
 export const PYPI_FILE_PATH = "/pypi/files";
+
+/** Hostname only: accepts "npm.example.com" or "https://npm.example.com/". */
+function domain(value: string | undefined): string {
+  return (value ?? "").trim().replace(/^https?:\/\//, "").replace(/[/:].*$/, "").toLowerCase();
+}
+
+/**
+ * Optional dedicated hostnames. A registry with a domain is served only on that
+ * host, at its root, and its *_PATH is ignored; one without keeps its path.
+ */
+export const NPM_DOMAIN: string = domain(process.env.NPM_DOMAIN);
+export const PYPI_DOMAIN: string = domain(process.env.PYTHON_DOMAIN);
