@@ -69,7 +69,8 @@ The compose file reads `.env`, exposes the port, and persists the cache in a
 named volume. Or build the image directly:
 ```bash
 docker build -t http2-proxy-cacher .
-docker run --env-file .env -p 4873:4873 -v cache:/data http2-proxy-cacher
+# PORT=4873 overrides the .env value so it matches the published container port.
+docker run --env-file .env -e PORT=4873 -p 4873:4873 -v cache:/data http2-proxy-cacher
 ```
 
 Build options (`--build-arg`):

@@ -30,3 +30,18 @@ export function randomID(length = 10) {
     }
     return id;
 }
+/**
+ * fs.rename that retries briefly on EPERM/EBUSY: on Windows, renaming over a
+ * file that another request is still streaming fails until that reader closes.
+ */
+export async function renameWithRetry(from: string, to: string, attempts = 20) {
+    for (let i = 0; ; i++) {
+        try {
+            return await fs.promises.rename(from, to);
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (i >= attempts || (code !== "EPERM" && code !== "EBUSY")) throw err;
+            await new Promise((r) => setTimeout(r, 50));
+        }
+    }
+}

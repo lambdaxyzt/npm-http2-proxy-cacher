@@ -8,13 +8,14 @@ import { serveCachedPackageJSON } from "@src/lib/proxyHandlers";
 import { readPackageMeta } from "@src/lib/packageMeta";
 
 /** Polls `fn` until it returns truthy or the timeout elapses. */
-async function waitFor<T>(fn: () => Promise<T> | T, ms = 1000): Promise<T> {
+async function waitFor<T>(fn: () => Promise<T> | T, ms = 3000): Promise<T> {
   const deadline = Date.now() + ms;
   for (;;) {
     const value = await fn();
     if (value) return value;
     if (Date.now() > deadline) throw new Error("waitFor timed out");
-    await new Promise((r) => setTimeout(r, 10));
+    // Poll gently: each read holds the file open, which blocks the rename on Windows.
+    await new Promise((r) => setTimeout(r, 50));
   }
 }
 

@@ -6,7 +6,7 @@ import {
   StreamingReplaceURLTransform,
   StreamingReplaceTransform,
 } from "@src/lib/replaceDomainJSONFile/index";
-import { ensureDirectory, isPathExist, randomID } from "@src/util";
+import { ensureDirectory, isPathExist, randomID, renameWithRetry } from "@src/util";
 import { getPackagePaths } from "@src/lib/getPackagePaths";
 import {
   writePackageMeta,
@@ -230,7 +230,7 @@ export function serveCachedPackageJSON(
   tee.pipe(fileStream);
   fileStream.on("finish", async () => {
     try {
-      await fs.promises.rename(tempFile, packagePaths.packageJSON);
+      await renameWithRetry(tempFile, packagePaths.packageJSON);
       await updatePackageMetaUrl(packagePaths.packageMetaData, currentUrl);
     } catch (err) {
       console.error(err);
@@ -354,7 +354,7 @@ async function fetchPackageJSON(
         // the metadata always carries one for future 304 revalidation.
         const etag = upstreamEtag ?? `"${hasher.digest("hex")}"`;
         try {
-          await fs.promises.rename(currentTempFile, packagePaths.packageJSON);
+          await renameWithRetry(currentTempFile, packagePaths.packageJSON);
           await writePackageMeta(packagePaths.packageMetaData, {
             // Record the URL the tarball links were actually rewritten to, so a
             // later SERVER_URL change can be detected and fixed up on serve.
