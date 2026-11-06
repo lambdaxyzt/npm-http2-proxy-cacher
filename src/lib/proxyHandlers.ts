@@ -1,7 +1,9 @@
 import http from "node:http";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { PassThrough, pipeline, type Transform } from "node:stream";
+import { PassThrough, pipeline, type Readable, type Transform } from "node:stream";
+import { pipeline as pipelineAsync } from "node:stream/promises";
+import zlib from "node:zlib";
 import {
   StreamingReplaceURLTransform,
   StreamingReplaceTransform,
@@ -168,6 +170,56 @@ export async function handleTarball(
   });
 }
 
+/** Coalesces concurrent conversions of the same cached file. */
+const legacyConversions = new SingleFlight<void>();
+
+/**
+ * Converts plain metadata cached by an older version (`package.json`,
+ * `index.html`) to its `.gzip` path on first use, so its ETag stays valid and
+ * it needn't be downloaded again. On failure the caller simply fetches upstream.
+ */
+export async function gzipLegacyCache(gzipPath: string): Promise<void> {
+  const plainPath = gzipPath.slice(0, -".gzip".length);
+  await legacyConversions.run(gzipPath, async () => {
+    if ((await isPathExist(gzipPath)) || !(await isPathExist(plainPath))) return;
+    const tempFile = `${gzipPath}.${randomID()}.tmp`;
+    try {
+      await pipelineAsync(
+        fs.createReadStream(plainPath),
+        zlib.createGzip(),
+        fs.createWriteStream(tempFile),
+      );
+      await renameWithRetry(tempFile, gzipPath);
+      await fs.promises.unlink(plainPath);
+    } catch (err) {
+      console.error(err);
+      fs.unlink(tempFile, () => {});
+    }
+  }).promise;
+}
+
+/**
+ * Sends gzip bytes to `res`, unpacking them for clients that didn't ask for
+ * gzip. Uses `.pipe()` off `source` because it may also feed the cache file,
+ * and a client disconnecting must not cancel that write.
+ */
+function sendGzip(source: Readable, res: http.ServerResponse, acceptsGzip: boolean) {
+  // Piping into a closed response errors `source`, which would kill the write.
+  if (res.destroyed) return;
+  if (acceptsGzip) {
+    source.pipe(res);
+    return;
+  }
+  const gunzip = zlib.createGunzip();
+  source.pipe(gunzip);
+  pipeline(gunzip, res, (err) => {
+    // A client hanging up early is normal, not a failure.
+    if (err && (err as NodeJS.ErrnoException).code !== "ERR_STREAM_PREMATURE_CLOSE") {
+      console.error(err);
+    }
+  });
+}
+
 /**
  * Serves the cached package metadata to a downstream client, honouring the
  * client's own `If-None-Match`. If `clientETag` matches the ETag we hold, the
@@ -190,6 +242,7 @@ export function serveCachedPackageJSON(
   storedUrl?: string,
   currentUrl?: string,
   contentType = "application/json",
+  acceptsGzip = false,
 ) {
   if (etag && clientETag === etag) {
     res.writeHead(304, { etag });
@@ -199,8 +252,10 @@ export function serveCachedPackageJSON(
 
   const responseHeaders: Record<string, string> = {
     "content-type": contentType,
+    vary: "accept-encoding",
   };
   if (etag) responseHeaders.etag = etag;
+  if (acceptsGzip) responseHeaders["content-encoding"] = "gzip";
 
   const stream = fs.createReadStream(packagePaths.packageJSON);
   stream.on("error", () => {
@@ -210,7 +265,7 @@ export function serveCachedPackageJSON(
   res.writeHead(200, responseHeaders);
 
   if (!(storedUrl && currentUrl && storedUrl !== currentUrl)) {
-    stream.pipe(res);
+    sendGzip(stream, res, acceptsGzip);
     return;
   }
 
@@ -218,10 +273,10 @@ export function serveCachedPackageJSON(
   // the fixed bytes out to the client and, in parallel, back to disk.
   const rewrite = new StreamingReplaceTransform(storedUrl, currentUrl);
   const tee = new PassThrough();
-  pipeline(stream, rewrite, tee, (err) => {
+  pipeline(stream, zlib.createGunzip(), rewrite, zlib.createGzip(), tee, (err) => {
     if (err) console.error(err);
   });
-  tee.pipe(res);
+  sendGzip(tee, res, acceptsGzip);
 
   // Persist the fixed content atomically. Best-effort: failures here must not
   // affect the response, which streams from the same `tee`.
@@ -278,6 +333,7 @@ async function fetchPackageJSON(
   storedUrl: string | undefined,
   makeTransform: () => Transform,
   contentType: string | undefined,
+  acceptsGzip: boolean,
 ): Promise<PackageJSONOutcome> {
   const proxyReq = await upstream.request(headers);
 
@@ -300,6 +356,7 @@ async function fetchPackageJSON(
           storedUrl,
           serverUrl,
           contentType,
+          acceptsGzip,
         );
         resolve({ cached: true });
         return;
@@ -319,6 +376,10 @@ async function fetchPackageJSON(
       delete responseHeaders[":status"];
       delete responseHeaders["content-length"];
       delete responseHeaders["Content-Length"];
+      const upstreamGzip = responseHeaders["content-encoding"] === "gzip";
+      delete responseHeaders["content-encoding"];
+      responseHeaders.vary = "accept-encoding";
+      if (acceptsGzip) responseHeaders["content-encoding"] = "gzip";
       // Prefer the upstream ETag; if upstream sent none we derive one from a
       // hash of the stored content so downstream revalidation still works.
       const upstreamEtag =
@@ -336,7 +397,16 @@ async function fetchPackageJSON(
       const tee = new PassThrough();
       const hasher = crypto.createHash("sha256");
       tee.on("data", (chunk) => hasher.update(chunk));
-      pipeline(proxyReq, transform, tee, (err) => {
+      // Links can only be rewritten in plain text, so upstream gzip is unpacked
+      // first; the result is stored and sent gzipped, compressing it just once.
+      const steps = [
+        proxyReq,
+        ...(upstreamGzip ? [zlib.createGunzip()] : []),
+        transform,
+        zlib.createGzip(),
+        tee,
+      ];
+      pipeline(steps, (err) => {
         if (err) {
           // The pipeline error does not reach `fileStream` through `.pipe()`, so
           // tear it down explicitly to avoid leaving an orphaned temp file.
@@ -347,7 +417,7 @@ async function fetchPackageJSON(
         }
       });
       tee.pipe(fileStream);
-      tee.pipe(leaderRes);
+      sendGzip(tee, leaderRes, acceptsGzip);
 
       fileStream.on("finish", async () => {
         // Fall back to a content hash when upstream doesn't supply an ETag, so
@@ -405,6 +475,7 @@ export async function handlePackageJSON(
   makeTransform: () => Transform = () =>
     new StreamingReplaceURLTransform(parsedRequest.pkgName, serverUrl),
   contentType?: string,
+  acceptsGzip = false,
 ) {
   const { promise, leader } = packageJSONFetches.run(
     packagePaths.packageJSON,
@@ -422,6 +493,7 @@ export async function handlePackageJSON(
         storedUrl,
         makeTransform,
         contentType,
+        acceptsGzip,
       ),
   );
 
@@ -464,5 +536,6 @@ export async function handlePackageJSON(
     getRewriteUrl(meta),
     serverUrl,
     contentType,
+    acceptsGzip,
   );
 }

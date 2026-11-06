@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { Readable, Writable } from "node:stream";
 import type http from "node:http";
 import { handlePackageJSON } from "@src/lib/proxyHandlers";
@@ -14,7 +15,7 @@ class FakeUpstreamStream extends Readable {
   end() {
     return this;
   }
-  respond(status: number, headers: Record<string, string>, body?: string) {
+  respond(status: number, headers: Record<string, string>, body?: string | Buffer) {
     this.emit("response", { ":status": status, ...headers });
     if (body) this.push(body);
     this.push(null);
@@ -39,6 +40,10 @@ class MockRes extends Writable {
 
   get body() {
     return Buffer.concat(this.chunks).toString("utf-8");
+  }
+
+  get raw() {
+    return Buffer.concat(this.chunks);
   }
 
   _write(chunk: Buffer, _enc: BufferEncoding, cb: () => void) {
@@ -90,6 +95,7 @@ function call(
   upstream: H2ConnectionManager,
   res: MockRes,
   clientETag?: string,
+  acceptsGzip = false,
 ) {
   return handlePackageJSON(
     upstream,
@@ -103,6 +109,9 @@ function call(
     clientETag,
     REGISTRY,
     undefined,
+    undefined,
+    undefined,
+    acceptsGzip,
   );
 }
 
@@ -120,6 +129,71 @@ afterEach(async () => {
     maxRetries: 10,
     retryDelay: 20,
   });
+});
+
+describe("handlePackageJSON gzip", () => {
+  const cached = () => zlib.gunzipSync(fs.readFileSync(path.join(dir, "package.json"))).toString();
+
+  it("stores gzip and serves plain to a client without gzip", async () => {
+    const { upstream, streams } = fakeUpstream();
+    const res = new MockRes();
+    const done = call(upstream, res);
+    await tick();
+    streams[0].respond(200, { etag: ETAG }, UPSTREAM_BODY);
+    await done;
+
+    expect(res.body).toContain(`${SERVER_URL}/pkg/-/pkg-1.0.0.tgz`);
+    expect(res.headers["content-encoding"]).toBeUndefined();
+    expect(cached()).toBe(res.body);
+  });
+
+  it("unpacks a gzip upstream to rewrite links and sends gzip to the client", async () => {
+    const { upstream, streams } = fakeUpstream();
+    const res = new MockRes();
+    const done = call(upstream, res, undefined, true);
+    await tick();
+    streams[0].respond(
+      200,
+      { etag: ETAG, "content-encoding": "gzip" },
+      zlib.gzipSync(UPSTREAM_BODY),
+    );
+    await done;
+
+    expect(res.headers["content-encoding"]).toBe("gzip");
+    const sent = zlib.gunzipSync(res.raw).toString();
+    expect(sent).toContain(`${SERVER_URL}/pkg/-/pkg-1.0.0.tgz`);
+    expect(cached()).toBe(sent);
+  });
+
+  it("still finishes the cache write when the client disconnects", async () => {
+    const { upstream, streams } = fakeUpstream();
+    const res = new MockRes();
+    res.destroy();
+    const done = call(upstream, res);
+    await tick();
+    streams[0].respond(200, { etag: ETAG }, UPSTREAM_BODY);
+    await done;
+
+    expect(cached()).toContain(`${SERVER_URL}/pkg/-/pkg-1.0.0.tgz`);
+  });
+
+  it.each([true, false])(
+    "still finishes the cache write when the client drops mid-download (gzip: %s)",
+    async (acceptsGzip) => {
+      const { upstream, streams } = fakeUpstream();
+      const res = new MockRes();
+      const done = call(upstream, res, undefined, acceptsGzip);
+      await tick();
+      streams[0].emit("response", { ":status": 200, etag: ETAG });
+      await new Promise((r) => setTimeout(r, 50));
+      res.destroy();
+      streams[0].push(UPSTREAM_BODY);
+      streams[0].push(null);
+      await done;
+
+      expect(cached()).toContain(`${SERVER_URL}/pkg/-/pkg-1.0.0.tgz`);
+    },
+  );
 });
 
 describe("handlePackageJSON concurrent deduplication", () => {

@@ -4,6 +4,7 @@ import {
   handleTarball,
   handlePackageJSON,
   serveCachedPackageJSON,
+  gzipLegacyCache,
 } from "@src/lib/proxyHandlers";
 import type { Transform } from "node:stream";
 import { parseRequest } from "@src/lib/parseRequest";
@@ -111,6 +112,8 @@ async function serveMetadata(
   makeTransform?: () => Transform,
   contentType?: string,
 ) {
+  await gzipLegacyCache(packagePaths.packageJSON);
+
   const hasCache =
     (await isPathExist(packagePaths.packageJSON)) &&
     (await isPathExist(packagePaths.packageMetaData));
@@ -120,6 +123,7 @@ async function serveMetadata(
     typeof req.headers["if-none-match"] === "string"
       ? req.headers["if-none-match"]
       : undefined;
+  const acceptsGzip = String(req.headers["accept-encoding"] ?? "").includes("gzip");
 
   // ETag we cached from this upstream registry. May be missing on older
   // metadata files that were written before ETags were persisted per registry.
@@ -144,6 +148,7 @@ async function serveMetadata(
       storedUrl,
       publicUrl,
       contentType,
+      acceptsGzip,
     );
     return;
   }
@@ -153,6 +158,8 @@ async function serveMetadata(
   if (cachedEtag) {
     headers["If-None-Match"] = cachedEtag;
   }
+
+  headers["accept-encoding"] = "gzip";
 
   // Handlers resolve the upstream session only when they actually issue a
   // request, so a session torn down while we awaited above is never used.
@@ -170,6 +177,7 @@ async function serveMetadata(
     storedUrl,
     makeTransform,
     contentType,
+    acceptsGzip,
   );
 }
 

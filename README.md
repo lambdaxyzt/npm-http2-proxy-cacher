@@ -18,6 +18,11 @@ itself.
   `package.meta.json` (`{ "etags": { "<registry-url>": "<etag>" } }`). When the
   upstream sends no ETag, one is derived from a content hash so revalidation
   still works, and metadata missing an ETag is re-fetched to populate it.
+- **Gzip metadata** — package metadata and PyPI index pages are stored as
+  `.gzip` files and sent as they are to clients that accept gzip, so serving
+  them costs no compression work. The proxy also asks its upstream for gzip.
+  Plain `package.json` / `index.html` files from older versions are converted
+  the first time they are requested.
 - **Optional revalidation skip** — with `SKIP_304_CHECK` enabled, cached
   metadata is served without contacting the upstream (still honouring the
   client's `If-None-Match`), making installs very fast.

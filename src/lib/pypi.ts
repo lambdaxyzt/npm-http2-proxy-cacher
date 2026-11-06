@@ -38,7 +38,7 @@ export function parsePypiRequest(url: string): PypiRequest | null {
       upstreamPath: `/simple/${name}/`,
       paths: {
         dir,
-        packageJSON: path.join(dir, "index.html"),
+        packageJSON: path.join(dir, "index.html.gzip"),
         packageMetaData: path.join(dir, "index.meta.json"),
         tarball: null,
       },

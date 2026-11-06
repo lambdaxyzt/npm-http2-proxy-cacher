@@ -16,7 +16,7 @@ export function getPackagePaths({ pkgName, tarball }: { pkgName: string; tarball
     }
     return {
         dir: pkgDir,
-        packageJSON: path.resolve(pkgDir, "package.json"),
+        packageJSON: path.resolve(pkgDir, "package.json.gzip"),
         packageMetaData: path.resolve(pkgDir, "package.meta.json"),
         tarball: tarball ? path.resolve(pkgDir, tarball) : null,
     };

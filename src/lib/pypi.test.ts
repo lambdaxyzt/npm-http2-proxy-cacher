@@ -8,7 +8,7 @@ describe("parsePypiRequest", () => {
     expect(r.kind).toBe("index");
     expect(r.upstreamPath).toBe("/simple/foo-bar-baz/");
     const shard = hash("foo-bar-baz").slice(-2);
-    expect(r.paths.packageJSON.endsWith(path.join("python", "simple", shard, "foo-bar-baz", "index.html"))).toBe(true);
+    expect(r.paths.packageJSON.endsWith(path.join("python", "simple", shard, "foo-bar-baz", "index.html.gzip"))).toBe(true);
   });
 
   it("accepts index requests with or without /simple", () => {

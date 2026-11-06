@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { Writable } from "node:stream";
 import type http from "node:http";
 import { serveCachedPackageJSON } from "@src/lib/proxyHandlers";
@@ -42,6 +43,10 @@ class MockRes extends Writable {
     return Buffer.concat(this.chunks).toString("utf-8");
   }
 
+  get raw() {
+    return Buffer.concat(this.chunks);
+  }
+
   _write(chunk: Buffer, _enc: BufferEncoding, cb: () => void) {
     this.chunks.push(Buffer.from(chunk));
     cb();
@@ -70,7 +75,7 @@ const CACHED_BODY = JSON.stringify({ name: "pkg", versions: {} });
 
 beforeEach(async () => {
   dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "servecache-"));
-  await fs.promises.writeFile(path.join(dir, "package.json"), CACHED_BODY);
+  await fs.promises.writeFile(path.join(dir, "package.json"), zlib.gzipSync(CACHED_BODY));
 });
 
 afterEach(async () => {
@@ -147,6 +152,57 @@ describe("serveCachedPackageJSON (downstream 304)", () => {
   });
 });
 
+describe("serveCachedPackageJSON (gzip)", () => {
+  it("sends the cached gzip bytes as they are to a client that accepts gzip", async () => {
+    const res = new MockRes();
+    serveCachedPackageJSON(
+      makePaths(dir),
+      res as unknown as http.ServerResponse,
+      ETAG,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    await res.finished;
+
+    expect(res.headers["content-encoding"]).toBe("gzip");
+    expect(res.raw).toEqual(await fs.promises.readFile(path.join(dir, "package.json")));
+  });
+
+  it("unpacks for a client that does not accept gzip", async () => {
+    const res = new MockRes();
+    serveCachedPackageJSON(makePaths(dir), res as unknown as http.ServerResponse, ETAG, undefined);
+    await res.finished;
+
+    expect(res.headers["content-encoding"]).toBeUndefined();
+    expect(res.headers.vary).toBe("accept-encoding");
+    expect(res.body).toBe(CACHED_BODY);
+  });
+
+  it("keeps gzip and the rewrite when the stored URL differs", async () => {
+    await fs.promises.writeFile(
+      path.join(dir, "package.json"),
+      zlib.gzipSync('{"t":"http://old/x.tgz"}'),
+    );
+    const res = new MockRes();
+    serveCachedPackageJSON(
+      makePaths(dir),
+      res as unknown as http.ServerResponse,
+      ETAG,
+      undefined,
+      "http://old",
+      "http://new",
+      undefined,
+      true,
+    );
+    await res.finished;
+
+    expect(zlib.gunzipSync(res.raw).toString()).toBe('{"t":"http://new/x.tgz"}');
+  });
+});
+
 describe("serveCachedPackageJSON (SERVER_URL fix-up)", () => {
   const OLD = "http://old-host:3000";
   const NEW = "http://new-host:8080";
@@ -155,7 +211,7 @@ describe("serveCachedPackageJSON (SERVER_URL fix-up)", () => {
   });
 
   beforeEach(async () => {
-    await fs.promises.writeFile(path.join(dir, "package.json"), TARBALL_BODY);
+    await fs.promises.writeFile(path.join(dir, "package.json"), zlib.gzipSync(TARBALL_BODY));
   });
 
   it("rewrites the stale proxy host when the stored URL differs", async () => {
@@ -196,8 +252,9 @@ describe("serveCachedPackageJSON (SERVER_URL fix-up)", () => {
 
     // The on-disk package.json is rewritten...
     const onDisk = await waitFor(async () => {
-      const c = await fs.promises.readFile(path.join(dir, "package.json"), "utf-8");
-      return c.includes(NEW) ? c : undefined;
+      const c = await fs.promises.readFile(path.join(dir, "package.json"));
+      const text = zlib.gunzipSync(c).toString("utf-8");
+      return text.includes(NEW) ? text : undefined;
     });
     expect(onDisk).not.toContain(OLD);
 
